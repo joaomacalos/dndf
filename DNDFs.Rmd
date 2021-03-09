@@ -1,0 +1,1089 @@
+---
+title: "DNDFs paper"
+author: "João Pedro S. Macalós"
+date: "3/9/2021"
+output: html_document
+---
+
+Load required packages:
+
+```{r}
+## Load packages
+library(lubridate)
+library(broom)
+library(extrafont)
+loadfonts(device = "win")
+library(ggpubr)
+library(ggridges)
+library(zoo)
+library(rugarch)
+library(hashmap)
+library(texreg)
+library(tidyverse)
+library(data.table)
+```
+Register "not in" and `multi_join` functions:
+
+```{r}
+# Not in:
+'%!in%' <- function(x,y)!('%in%'(x,y))
+
+# Multi join:
+multi_join = function(join_function, list_to_be_joined, ...) {
+  Reduce(
+    function(x, y, ...) join_function(x, y, all = TRUE, ...),
+    list_to_be_joined
+  )
+}
+```
+
+
+# Load main datafiles
+
+```{r}
+# Ptax, vix, and oil series:
+ptax_vix_oil_vars = read_csv('Datasets/ptax_vix_oil.csv') %>%
+  filter(date >= '2009-01-01') %>%
+  set_names(c("date", "vix", "oil", "ptax"))
+
+# Exchange rates of developing and emerging economies:
+bis_fx_dees <- read_csv('Datasets/bis_fx_dees.csv')
+
+# Same cleaned for ploting:
+bis_fx_plot <- read_csv("Datasets/bis_fx_plot.csv")
+
+# Information about DNDFs interventions from the BCB "open market" operations:
+swaps_consolidated <- read_csv('Datasets/bcb_swaps.csv')
+
+# Insitutional positions at the B3:
+
+b3_fut <- read_csv('Datasets/b3_fut.csv')
+b3_cupom <- read_csv('Datasets/b3_cupom.csv')
+b3_swaps <- read_csv('Datasets/b3_swaps.csv')
+b3_opc <- read_csv("Datasets/b3_opc.csv")
+b3_opv <- read_csv("Datasets/b3_opv.csv")
+
+# Banks spot USD position:
+banks_spot_usd <- read_csv('Datasets/banks_spot_usd.csv')
+
+# Financial volume at B3:
+b3_volume <- read_csv("Datasets/b3_volume.csv")
+
+# Libor and EMBI+:
+libor <- read_csv("Datasets/libor_raw.csv", col_types = c("Dddddddddddd"))
+embi <- read_csv("Datasets/embi_raw.csv")
+```
+
+# Figure 1: Institutional positions in the DNDFs market:
+
+Function to widen b3 files:
+
+```{r}
+wider_b3files <- function(dataset) {
+  dataset %>%
+    select(date, sector, net) %>%
+    ungroup %>%
+    mutate(net = net * 50000 / 10^9) %>% 
+    filter(sector %!in% c('Pessoa Física', "DTVM'S e Corretoras de Valores", "Outras Jurídicas Financeiras")) %>%
+    pivot_wider(id_cols = 'date', names_from = 'sector', values_from = 'net') %>%
+    mutate(across(-c('date'), ~replace_na(.x, 0))) %>%
+    filter(date >= '2008-12-01')
+}
+```
+
+Reshape B3 files:
+
+```{r}
+b_swaps <- b3_swaps %>%
+  wider_b3files() %>%
+  set_names(c('date', 'bcb', 'banks', 'institutional_investors', 'foreigners', 'non_financial_corps'))
+
+b_cupom <- b3_cupom %>%
+  wider_b3files() %>%
+  set_names(c('date', 'banks', 'institutional_investors', 'foreigners', 'non_financial_corps'))
+
+b_fut <- b3_fut  %>%
+  wider_b3files() %>%
+  set_names(c('date', 'banks', 'institutional_investors', 'foreigners', 'non_financial_corps'))
+
+b_opc <- b3_opc %>%
+  wider_b3files() %>%
+  set_names(c('date', 'banks', 'institutional_investors', 'foreigners', 'non_financial_corps'))
+
+b_opv <- b3_opv %>%
+  wider_b3files() %>%
+  set_names(c('date', 'banks', 'institutional_investors', 'foreigners', 'non_financial_corps')) %>%
+  mutate(across(-date, ~ .x * -1))
+```
+
+Check that dates from b3 files are the same:
+
+```{r}
+identical(b_cupom[,'date'], b_fut[,'date'])
+identical(b_cupom[,'date'], b_opc[,'date'])
+identical(b_cupom[,'date'], b_opv[,'date'])
+```
+Combine FX derivatives markets:
+
+```{r}
+b_futs <- b_cupom %>%
+  bind_rows(b_fut) %>%
+  bind_rows(b_opc) %>%
+  bind_rows(b_opv) %>%
+  group_by(date) %>%
+  summarize(across(everything(), ~sum(.x))) %>%
+  mutate(bcb = 0)
+```
+Function to tody and relevel sectors as factors for ploting:
+
+```{r}
+tidy_b3files <- function(tibble) {
+  tibble %>%
+    pivot_longer(cols = -c('date'), names_to = 'sector', values_to = 'net') %>%
+    mutate(sector = fct_relevel(sector, c(
+      'bcb',
+      'banks',
+      'institutional_investors',
+      'foreigners',
+      'non_financial_corps'
+    )))
+}
+```
+
+Tidy files:
+
+```{r}
+b_swaps_tidy <- b_swaps %>%
+  tidy_b3files()
+
+b_futs_tidy <- b_futs %>%
+  tidy_b3files()
+```
+
+Labels for each group and dates:
+
+```{r}
+# Group labels for plots
+groups_labels <- c('Central Bank',
+                   'Commercial Banks',
+                   'Institutional Investors',
+                   'Non Resident Investors',
+                   'Non Financial Corps.')
+
+# Plot A: positions at swaps market
+dates <- select(b_swaps_tidy, date) %>% filter(date >= "2009-01-01") %>% unique() %>% pull()
+```
+
+
+## Figure 1
+
+```{r, fig.height=9, fig.width=7, message=FALSE, warning=FALSE}
+plot_inst1 <- b_swaps_tidy %>%
+  filter(date >= '2009-01-01', date < "2021-01-01") %>%
+  ggplot(aes(x = date, y = net, fill = sector)) +
+  annotate("text", x = as.Date("2009-07-02"), y = 95, color = 'darkgray', label = "Long USD", size = 4) +
+  annotate("text", x = as.Date("2009-07-02"), y = -95, color = 'darkgray', label = "Short USD", size = 4) +
+  geom_col(width = 10) +
+  bdscale::scale_x_bd(business.dates= dates, 
+                      max.major.breaks = 30, 
+                      max.minor.breaks = 10,
+                      labels= scales::date_format("%Y")) +
+  scale_fill_viridis_d('',
+                       labels = groups_labels) +
+  labs(x='', y='US$ Billion', subtitle = 'A: DNDFs market') +
+  theme_bw(base_family = "MS Reference Sans Serif") +
+  theme(legend.position = 'bottom',
+        plot.caption = element_text(hjust = 0),
+        axis.title.x = element_blank()) +
+  guides(fill=guide_legend(nrow=2,byrow=TRUE))
+
+  
+
+#plot_inst1
+
+# Plot B: positions at derivatives markets
+
+plot_inst2 <- b_futs_tidy %>%
+  filter(date >= '2009-01-01', date < "2021-01-01") %>%
+  ggplot(aes(x = date, y = net, fill = sector)) +
+  annotate("text", x = as.Date("2009-07-02"), y = 35, color = 'darkgray', label = "Long USD", size = 4) +
+  annotate("text", x = as.Date("2009-07-02"), y = -35, color = 'darkgray', label = "Short USD", size = 4) +
+  geom_col(width = 10) +
+  bdscale::scale_x_bd(business.dates = dates, 
+                      max.major.breaks=30, 
+                      max.minor.breaks = 10,
+                      labels= scales::date_format("%Y")) +
+  scale_fill_viridis_d('',
+                       labels = groups_labels) +
+  theme_bw(base_family = "MS Reference Sans Serif") +
+  labs(x='', y='US$ Billion', subtitle = 'B: DDI and Future Markets') +
+  theme(legend.position = 'bottom',
+        plot.caption = element_text(hjust = 0),
+        axis.title.x = element_blank()) +
+  guides(fill=guide_legend(nrow=2,byrow=TRUE))
+
+
+
+ggpubr::ggarrange(plot_inst1, plot_inst2, 
+                  nrow = 2, ncol = 1,
+                  common.legend = T,
+                  legend = 'bottom') 
+```
+
+# Figure 2:
+
+Clean dataset:
+
+```{r}
+banks_spot_usd1 <- banks_spot_usd %>%
+  as_tibble() %>%
+  mutate(def = "Commercial banks' FX spot position") %>%
+  filter(date >= '2009-01-01', date < "2021-01-01")
+```
+
+Plot:
+
+```{r}
+banks_spot_plot = ggplot() + 
+  geom_bar(data = banks_spot_usd1,
+           aes(x=lag(date), y=value/1000, fill = def),
+           stat='identity', width = 33) +
+  annotate("text", x = as.Date("2009-07-02"), y = 10, color = 'darkgray', label = "Long USD", size = 4) +
+  annotate("text", x = as.Date("2009-07-02"), y = -38, color = 'darkgray', label = "Short USD", size = 4) +
+  scale_x_date(breaks = '1 year', date_labels = '%Y', minor_breaks = NULL) +
+  scale_fill_viridis_d('') +
+  labs(x='', y='US$ Billion') +
+  theme_bw(base_family = "MS Reference Sans Serif") +
+  theme(legend.position = 'none',
+        plot.caption = element_text(hjust = 0)) +
+  guides(fill=guide_legend(nrow=1,byrow=TRUE))
+
+banks_spot_plot
+```
+
+
+# Table 1
+
+Function to summarize data to monthly frequency and get variations:
+
+```{r}
+tidy_b3monthly <- function(tibble) {
+  tibble %>%
+    mutate(year = year(date), month = month(date)) %>%
+    group_by(sector, year, month) %>%
+    summarize(net = last(net)) %>%
+    mutate(date = ymd(str_c(year, month, sep = '-'), truncated = 1)) %>%
+    ungroup %>%
+    select(date, sector, net) %>%
+    group_by(sector) %>%
+    mutate(net = net - lag(net)) %>%
+    drop_na() %>%
+    filter(date < "2021-01-01")
+}
+```
+
+
+Reshape data for regressions:
+
+```{r}
+b_swaps_monthly <- b_swaps_tidy %>%
+  tidy_b3monthly() %>%
+  pivot_wider(id_cols = 'date', names_from = 'sector', names_prefix = 'swaps_', values_from = 'net')
+
+b_futs_monthly <- b_futs_tidy %>%
+  tidy_b3monthly() %>%
+  pivot_wider(id_cols = 'date', names_from = 'sector', names_prefix = 'futs_', values_from = 'net')
+
+banks_spot <- banks_spot_usd %>%
+  as_tibble() %>%
+  mutate(spot_banks = (value - lag(value))/1000) %>%
+  drop_na() %>%
+  select(date, spot_banks) %>%
+  filter(date < "2021-01-01")
+```
+
+
+```{r}
+b_reg_data <- left_join(b_swaps_monthly, b_futs_monthly) %>%
+  left_join(banks_spot)
+
+b_reg1 <- lm(futs_banks ~ swaps_bcb + futs_institutional_investors, data = b_reg_data)
+b_rob1 <- lmtest::coeftest(b_reg1, vcov = sandwich::vcovHC(b_reg1, type = "HC0"))
+#summary(b_reg1)
+
+b_reg2 <- lm(futs_institutional_investors ~ swaps_bcb + futs_banks, data = b_reg_data)
+b_rob2 <- lmtest::coeftest(b_reg2, vcov = sandwich::vcovHC(b_reg2, type = "HC0"))
+#summary(b_reg2)
+
+b_reg3 <- lm(spot_banks ~ swaps_bcb + futs_banks + futs_institutional_investors, data = b_reg_data)
+b_rob3 <- lmtest::coeftest(b_reg3, vcov = sandwich::vcovHC(b_reg3, type = "HC0"))
+#summary(b_reg3)
+
+texreg::screenreg(list(b_reg1, b_rob1, b_reg2, b_rob2, b_reg3, b_rob3), stars = c(.01, .05, .1), digits = 3)
+```
+
+# Figure 4.3
+
+```{r}
+b3_volume %>%
+  ggplot(aes(x = date, y = vol_usd)) +
+  geom_col(aes(fill = mercado)) +
+  geom_col(aes(fill = mercado, color = mercado), show.legend = FALSE) +
+  theme_bw() +
+  theme(legend.position = c(.1, .85),
+        legend.box.background = element_rect(colour = "black", size = 2)) +
+  #scale_fill_brewer("Contract:", palette = "YlGnBu", direction = -1) +
+  scale_fill_viridis_d("Contract:") +
+  scale_color_viridis_d() +
+  labs(y = "US$ Billion", x = "") +
+  scale_x_date(date_breaks = "2 year", date_labels = "%Y")
+```
+
+
+# Figure 4
+
+Concatenate libor and embi files and rename:
+
+```{r}
+control_libor_embi <- libor %>%
+  janitor::clean_names() %>%
+  left_join(rename(embi, embi = value)) %>%
+  select(-code) %>%
+  set_names(c("date", "m3", "m1", "m12", "m6", "on", "m2", "w1", "m9", "m4", 'w2', "m5", "embi")) %>%
+  select(date, on, w1, m1, m2, m3, m6, m12, embi)
+```
+
+
+Clean DNDFs tibble and remove purchase (reverse) swaps:
+
+```{r}
+# Clean swaps tibble
+swaps = swaps_consolidated %>% 
+  distinct() %>% 
+  mutate_at(vars(sell, purchase), list(~ as.numeric(.))) %>% 
+  select(-obs) %>%
+  filter(!is.na(q_accepted)) %>% 
+  filter(q_accepted != 0)
+
+
+# Remove purchase/reverse swaps
+c_swaps = swaps %>% distinct() %>% filter(type == 'SWAPC')
+```
+
+
+Find maturities of each interventions to calculate the coupon-libor spread:
+
+```{r}
+d_swaps1 <- c_swaps %>%
+  mutate(dt_to_mat = (dt_mat - dt_st)/30) %>%
+  mutate(dt_to_mat = round(as.numeric(dt_to_mat))) %>%
+  full_join(control_libor_embi, by= c('dt_auction' = "date")) %>%
+  arrange(dt_auction) %>%
+  mutate(spread = case_when(dt_to_mat == 0 ~ mean_rate - w1,
+                            dt_to_mat == 1 ~ mean_rate - m1,
+                            dt_to_mat == 2 ~ mean_rate - m2,
+                            dt_to_mat == 3 ~ mean_rate - m3,
+                            dt_to_mat == 4 ~ mean_rate - m3,
+                            dt_to_mat == 5 ~ mean_rate - m3,
+                            dt_to_mat == 6 ~ mean_rate - m6,
+                            dt_to_mat == 7 ~ mean_rate - m6,
+                            dt_to_mat == 8 ~ mean_rate - m6,
+                            dt_to_mat == 9 ~ mean_rate - m6,
+                            dt_to_mat == 10 ~ mean_rate - m6,
+                            dt_to_mat == 11 ~ mean_rate - m6,
+                            dt_to_mat >= 12 ~ mean_rate - m12
+  )) %>%
+  filter(embi != 0) %>%
+  select(n, dt_auction, dt_st, dt_to_mat, q_accepted, spread, embi, mean_rate) %>%
+  mutate_at(vars(-dt_auction, -n, -dt_st, -dt_to_mat), list(~replace_na(., 0))) %>%
+  rename(date = dt_auction) %>%
+  filter(date >= '2009-01-01', date < "2021-01-01")
+
+ d_swaps2 <- d_swaps1 %>%
+   filter(spread > 0) %>%
+   mutate(spr_embi = spread - embi,
+         above = if_else(spr_embi > 0, 1, 0))
+  
+```
+
+
+Plot:
+
+```{r}
+ggplot(data = d_swaps1, aes(x = date)) +
+  geom_line(data = d_swaps1, aes(y = embi, color = 'black')) +
+  geom_bar(data = (d_swaps2 %>% mutate(coupon = 1)), 
+           aes(y = spread, fill = as_factor(coupon)), position = 'dodge', stat = 'identity', width = 5, alpha = 0.7) +
+  scale_color_manual('', values='black', labels = c('EMBI+')) +
+  scale_fill_manual('', labels=c('Coupon-libor spread'), values = "dodgerblue4") +
+  labs(x='', y='(% p.a.)') +
+  scale_x_date(breaks = '1 year', date_labels = '%Y') +
+  #theme_minimal(base_family = 'MS Reference Sans Serif') +
+  theme_bw(base_family = "MS Reference Sans Serif") +
+  theme(legend.position = c(.8, .75),
+    #legend.position = "bottom",
+        legend.text.align = 0,
+        legend.box.background = element_rect(color = 'black'),
+        legend.background = element_blank(),
+        plot.caption = element_text(hjust = 0),
+        legend.direction="horizontal")
+```
+
+# Appendix A: GARCH analysis
+
+Load functions to perform regressions:
+
+```{r}
+source("garch_functions.R")
+```
+
+Consolidate DNDFs file by day:
+
+```{r}
+p_swaps <- c_swaps %>% 
+  group_by(n) %>%
+  summarize(date = first(date), dt_auction = first(dt_auction), dt_st = first(dt_st),
+            q_accepted = sum(q_accepted))
+
+p_swaps2 <- p_swaps %>%
+  select(date = dt_auction, q_accepted) %>%
+  group_by(date) %>% 
+  summarize(q_accepted = sum(q_accepted))
+```
+
+Create tibble for analysis:
+
+```{r}
+# 1. Load dependent and control variables, drop nas, convert into a tibble, and exclude day with negative oil prices:
+garch_vars <- ptax_vix_oil_vars %>%
+  drop_na(ptax, vix, oil) %>%
+  filter(oil > 0)
+
+garch_datap <- garch_vars %>%
+  full_join(p_swaps2) %>%
+  arrange(date) %>%
+  filter(date >= '2009-01-01', date < "2021-01-01") %>%
+  mutate(q_accepted = replace_na(q_accepted, 0)) %>%
+  select(date, q_accepted, everything()) %>%
+  mutate(across(c(vix, oil, ptax), ~ log(.x))) %>% 
+  mutate(across(c(vix, oil, ptax), ~ .x - lag(.x))) %>%
+  drop_na()
+```
+
+## GARCH adequacy tests:
+
+Plot returns with squared and absolute returns
+
+```{r}
+adeq_1 = garch_datap %>% 
+  select(date, ptax) %>%
+  mutate(sq = ptax^2, abs = abs(ptax)) %>% 
+  mutate_at(vars(ptax), list(~ zoo(.,date))) %>%
+  drop_na()
+adeq_2 = cbind(adeq_1$ptax, adeq_1$sq, adeq_1$abs)
+colnames(adeq_2) = c('ptax', 'ptax_sq', 'ptax_abs')
+plot.zoo(adeq_2, main='', col='blue', xlab='')  
+```
+
+Note the spikes in the returns that justify the utilization of GARCH models.
+
+Plot autocorrelations of returns, returns^2 and abs(returns)
+
+```{r}
+par(mfrow=c(3,1))
+acf(adeq_2$ptax, main="ER Returns", na.action = na.pass)
+acf(adeq_2$ptax_sq, main="ER Returns^2", na.action = na.pass)
+acf(adeq_2$ptax_abs, main="ER abs(Returns)", na.action = na.pass)
+par(mfrow=c(1,1)) 
+```
+
+```{r}
+# compute summary statistics
+PerformanceAnalytics::table.Stats(adeq_2)
+which.min(adeq_2$ptax)
+adeq_2$ptax[1638] # Turbulência de setembro/2015
+which.max(adeq_2$ptax)
+adeq_2$ptax[2034] # 18 de maio de 2017 (JBS scandal)
+```
+
+Testing for ARCH/GARCH effects in returns
+
+```{r}
+# use Box.test from stats package
+Box.test(coredata(adeq_2$ptax_sq), type="Ljung-Box", lag = 12)
+```
+
+Enough evidence to reject the null effect of no auto-correlation in the residuals
+
+```{r}
+# use ArchTest() function from FinTS package for Engle's LM test
+FinTS::ArchTest(adeq_2$ptax)
+```
+
+Evidence of ARCH effets.
+
+## Estimations
+
+Identify ays with spread above EMBI:
+
+```{r}
+days_spread <- d_swaps2 %>%
+  filter(above == 1) %>%
+  select(date, spr = above) %>%
+  distinct()
+```
+
+
+Join `days_spread` and `bis_fx_dees` and normalize by standard deviations:
+
+```{r}
+garch_spr <- garch_datap %>%
+  left_join(days_spread) %>%
+  mutate(spr = replace_na(spr, 0),
+         swap = if_else(q_accepted > 0, 1, 0)) %>%
+  drop_na() %>%
+  left_join(bis_fx_dees) %>%
+  drop_na() %>%
+  mutate(across(c(vix, oil, ptax, fx_dees), ~ .x / sd(.x))) %>%
+  mutate(across(contains(c('spr', 'swap')), list(lag = ~ lag(.x),
+                                         lead = ~ lead(.x)))) %>%
+  drop_na() %>%
+  select(date, vix, oil, ptax, fx_dees, spr_lag, spr_lead, swap_lag, swap_lead)
+```
+
+Create `zoo` objects (necessary for estimating garch models with `rugarch`):
+
+```{r}
+spr_control <- garch_spr %>% 
+  select(-ptax, -swap_lag, -swap_lead) %>%
+  zoo::read.zoo()
+
+swap_control <- garch_spr %>%
+  select(-ptax, -spr_lag, -spr_lead) %>%
+  zoo::read.zoo()
+```
+
+
+Transform into matrices:
+
+```{r}
+spr_matrix <- as.matrix(spr_control)
+swap_matrix <- as.matrix(swap_control)
+```
+
+
+Create `zoo` file for dependent variable:
+
+```{r}
+spr_ptax <- garch_spr %>% select(date, ptax) %>% zoo::read.zoo()
+```
+
+### Estimate GARCH models
+
+```{r}
+# Only spreads above EMBI
+spr_garch_est <- estimate_garch(ext_regressors = spr_matrix, dep_var = spr_ptax)
+
+# All swaps (robustness check)
+swap_garch_est <- estimate_garch(ext_regressors = swap_matrix, dep_var = spr_ptax)
+```
+
+### Goodness-of-fit statistics
+
+```{r}
+# Save standardized residuals
+spr_std_residuals <- map(spr_garch_est, ~residuals(.x, standardize = T))
+
+## Standardized residuals 
+map(spr_std_residuals, ~as_tibble(rugarch_boxtest(.x, df = 1), rownames = 'Lag'))
+#--> No evidence of remaining autocorrelation
+
+## Standardized squared residuals
+map(spr_std_residuals, ~as_tibble(rugarch_boxtest(.x, df = 2, p = 2), rownames = 'Lag'))
+#--> No evidence of remaining GARCH effects
+
+## Weighted ARCH-LM test
+map(spr_garch_est, ~as_tibble(rugarch_archlm(.x), rownames = 'Lag'))
+#--> No evidence of remaining GARCH effects
+
+## Individual Nyblom stability tests
+# Create a dictionary to correct column names
+ext_regs_name <- colnames(spr_matrix)
+ext_mxreg <- str_c('mxreg', 1:5)
+
+dict_ext_reg <- tibble(key = ext_mxreg, value = ext_regs_name)
+dict_ext <- {hashmap::hashmap(dict_ext_reg$key, dict_ext_reg$value)}
+
+map(spr_garch_est, ~as_tibble(nyblom(.x)$IndividualStat, rownames = 'Variable') %>%
+      mutate(Variable = case_when(Variable %in% ext_mxreg ~ dict_ext[[Variable]],
+                                  T ~ Variable)) %>%
+      mutate(Stable_5pc = if_else(V1 - 0.47 > 0, 'No', 'Yes')))
+#--> The coefficients of interest are stable over time
+```
+
+# Table B1
+
+```{r}
+spr_table <- extract_table(spr_garch_est[4:9], spr_control, dep_var = spr_ptax)
+swap_table <- extract_table(swap_garch_est[4:9], swap_control, dep_var = spr_ptax)
+```
+
+```{r}
+texreg::screenreg(spr_table, 
+               digits = 3, 
+               custom.model.names = names(spr_garch_est)[4:9],
+               ci.force = T,
+               caption = '')
+```
+
+```{r}
+texreg::screenreg(swap_table, 
+                  digits = 3, 
+                  custom.model.names = names(swap_garch_est)[4:9],
+                  ci.force = T,
+                  caption = '')
+```
+
+# Figure 5
+
+To plot figure 5, join sigma to garch_spr dataset and plot:
+
+```{r}
+fig5data <- garch_spr %>%
+  mutate(sigma = spr_garch_est[[5]]@fit$sigma,
+         spr = lag(spr_lead)) %>%
+  drop_na() %>% 
+  filter(date <= "2021-01-01")
+
+fig5data %>%
+  ggplot() +
+  geom_bar(aes(x=date, y=spr*2.25, fill = 'blue'), position='dodge', stat='identity', alpha = 0.4, width = 10) +
+  geom_line(aes(x=date, y=sigma, color = 'blue'), stat='identity', size = 0.75) +
+  scale_color_manual("", values = c('black'), labels = c('Cond. variance')) +
+  scale_fill_manual("", values = c('dodgerblue3'), labels = c('High-coupon FX Swaps')) +
+  labs(x='', y='Cond. variance') +
+  scale_x_date(breaks = '1 year', date_labels = '%Y') +
+  theme_bw(base_family = "MS Reference Sans Serif") +
+  theme(legend.position = 'bottom',
+        plot.caption = element_text(hjust = 0))
+```
+
+# Windows estimation
+
+## Data preparation
+
+Source `windows_functions.R`:
+```{r}
+source("windows_functions.R")
+```
+
+
+
+Convert `spr_lead` to `spr` to get the day of each intervention and create new column with ids for each row:
+
+```{r}
+d <- garch_spr %>%
+  mutate(spr = lag(spr_lead)) %>%
+  mutate(id = row_number())
+```
+
+
+Check that "historical" conditional average of ptax is statistically equal to zero:
+
+```{r}
+mod_base <- robustbase::lmrob(ptax ~ vix + oil + fx_dees, data = d)
+broom::tidy(mod_base)
+```
+
+All days with DNDFs with coupon-libor spread above EMBI+:
+
+```{r}
+d_spr <- d %>%
+  filter(spr == 1) %>%
+  mutate(dist = id - lag(id)) %>%
+  select(date, id, dist)
+```
+
+
+```{r}
+# Windows of 1 to 10 days length
+days = 1:10
+```
+
+
+
+Group interventions (exclude adjacent days):
+
+```{r}
+groups_of_ints <- select(d_spr, c('date', 'id', 'dist')) %>%
+  rename(row_n = id) %>%
+  mutate(grouped = if_else(dist <= 1, 1, NA_real_)) %>% 
+  #filter(is.na(grouped)) # 18 nas
+  mutate(grouped = replace(grouped, is.na(grouped), seq(1, 18, 1))) %>%
+  mutate(grouped = if_else(grouped == 1, NA_real_, grouped)) %>%
+  fill(grouped) %>%
+  mutate(grouped = replace_na(grouped, 1))
+```
+
+
+Save first day and last day of the windows:
+
+```{r}
+groups <- groups_of_ints %>%
+  group_by(grouped) %>%
+  summarize(first = first(date), last = last(date))
+```
+
+Extract first day of each window:
+
+```{r}
+g_first <- groups %>%
+  select(g = grouped, date = first)
+```
+
+
+Extract ids of first day of interventions by groups
+
+```{r}
+f <- d %>%
+  full_join(g_first) %>%
+  filter(!is.na(g)) %>%
+  select(id, g)
+```
+
+Calculate averages before each window:
+
+```{r}
+vbw <- map(days, ~days_previous_window(f, .x))
+vars_vbw <- map(vbw, ~average_vars(d, .x))
+```
+
+Test that same results are obtained with different method for finding averages:
+```{r}
+vars_vbw[[5]]
+
+get_mav_tb(d, 5) %>%
+  filter(id %in% (f$id - 1)) %>%
+  select(date, id, contains('mav'))
+```
+
+
+Save days from the end of each window:
+
+```{r}
+g_last <- groups %>%
+  select(g = grouped, date = last)
+```
+
+
+Ids of last date of intervention by groups:
+
+```{r}
+l <- d %>%
+  full_join(g_last) %>%
+  filter(!is.na(g)) %>%
+  select(id, g)
+```
+
+Calculate averages after each window:
+
+```{r}
+vaw <- map(days, ~days_after_window(l, .x))
+vars_vaw <- map(vaw, ~average_vars(d, .x))
+```
+
+Test that same results are obtained with different method for finding averages:
+```{r}
+vars_vaw[[5]]
+
+get_mav_tb(d, 5) %>%
+  filter(id %in% (l$id + 5)) %>%
+  select(date, id, contains('mav'))
+```
+
+Unlist and tidy the lists with averages and combine them together:
+
+```{r}
+# Unlist and tidy 'after' tibble
+b1 <- bind_rows(vars_vaw) %>%
+  pivot_longer(cols = contains('mean'), names_to = 'mean', values_to = 'value') %>%
+  mutate(group = 'after') %>%
+  select(g, days, mean, value, group)
+
+# Unlist and tidy 'before' tibble
+b2 <- bind_rows(vars_vbw) %>%
+  pivot_longer(cols = contains('mean'), names_to = 'mean', values_to = 'value') %>%
+  mutate(group = 'before') %>%
+  select(g, days, mean, value, group)
+
+# Bind together and relevel 'group' column for estimations
+b3 <- bind_rows(b1, b2) %>%
+  mutate(group = fct_relevel(group, c('after', 'before')))
+```
+
+Plot evolution of PTAX before and after each window:
+
+```{r}
+# To get actual PTAX values, join vbw[[10]] tibble (ids) with 'd', main data file
+data_bw10 <- left_join(vbw[[10]], d, by = 'id') %>% 
+  mutate(group = 'before') %>%
+  group_by(g) %>%
+  mutate(time = seq(10, 1, -1))
+
+# Same for after windows but with vaw[[30]]
+data_aw10 <- left_join(vaw[[10]], d, by = 'id') %>% 
+  mutate(group = 'after') %>% 
+  group_by(g) %>%
+  mutate(time = seq(1, 10, 1))
+
+data_10 <- bind_rows(data_bw10, data_aw10)
+
+data_10 %>%
+  ungroup %>%
+  pivot_longer(cols = c('vix', 'oil', 'fx_dees', 'ptax'), values_to = 'value', names_to = 'variable') %>%
+  mutate(time = if_else(group == 'after', time, time * -1)) %>%
+  mutate(group = fct_relevel(group, c('before', 'after'))) %>%
+  filter(variable == 'ptax') %>%
+  #mutate(black_line = if_else(days != 0, 0, NA_real_)) %>%
+  ggplot(aes(x = time, y = value, group = group)) +
+  geom_jitter(aes(y = value, color = group), alpha = .5, width = .1) +
+  geom_smooth(se = F, aes(color = group)) +
+  scale_color_brewer('', type = 'qual', palette = 'Dark2', direction = -1) +
+  #scale_color_viridis_d(begin = 0.25, end = 0.75) +
+  scale_x_continuous(breaks = seq(-10, 10, 5)) +
+  #geom_line(aes(y = black_line), lwd = 1) +
+  #facet_wrap(~variable) +
+  theme_bw() +
+  theme(legend.position = c(0.9, .15),
+        plot.caption = element_text(hjust = 0),
+        legend.title = element_blank(),
+        legend.spacing.y = unit(0, "mm"), 
+        panel.border = element_rect(colour = "black", fill=NA),
+        #aspect.ratio = 1, axis.text = element_text(colour = 1, size = 12),
+        legend.background = element_blank(),
+        legend.box.background = element_rect(colour = "black")) +
+  labs(#caption = 'Daily variation of selected variables on x days before/after the window of intervention',
+    x = 'Days before/after intervention', y = 'Standard deviation units')
+```
+
+Plot evolution of dependent and independent variables:
+
+```{r}
+b3 %>%
+  mutate(mean = str_remove(mean, '_mean')) %>%
+  mutate(mean = case_when(mean == 'ptax' ~ str_to_upper(mean), 
+                          mean == 'dees' ~ 'fx.dees',
+                          T ~ mean)) %>%
+  mutate(mean = fct_relevel(mean, c('PTAX', 'oil', 'vix', 'fx.dees'))) %>% 
+  filter(days %in% c(1, 3, 6, 10)) %>%
+  mutate(days = if_else(days != 1, str_c(days, ' days'), str_c(days, ' day'))) %>%
+  mutate(days = fct_relevel(days, c('1 day', '3 days', '6 days', '10 days'))) %>%
+  ggplot(aes(y = mean , x = value)) +
+  geom_boxplot(aes(fill = group)) +
+  geom_vline(xintercept = 0) +
+  scale_fill_brewer('', type = 'qual', palette = 'Dark2') +
+  facet_wrap(~ days) +
+  guides(fill = guide_legend(reverse = TRUE)) +
+  theme_bw(base_family = 'MS Reference Sans Serif') +
+  theme(legend.position = 'bottom') +
+  labs(y = '',
+       x = 'Standard deviation units')
+```
+
+## Estimations
+
+Reshape data for estimations:
+```{r}
+dummy_data <- b3 %>%
+  pivot_wider(id_cols = c('g', 'days', 'group'), names_from = 'mean', values_from = 'value') %>%
+  mutate(group = fct_relevel(group, c('after', 'before'))) 
+```
+
+Estimate the models:
+
+```{r}
+# Estimate the models
+dummy_models <- dummy_data %>%
+  nest_by(days) %>%
+  mutate(reg = list(lm(ptax_mean ~ group + vix_mean + oil_mean + dees_mean, data = data))) %>%
+  mutate(rob = list(robustbase::lmrob(ptax_mean ~ group + vix_mean + oil_mean + dees_mean, data = data, setting = 'KS2014')))
+```
+
+
+# Table A1 and A2:
+
+Extract tables from models and join them together:
+
+```{r}
+# Top part of the table
+top_table <- map2(list(
+  map(1:5, function(x) {dummy_models$rob[[x]]}), 
+  map(6:10, function(x) {dummy_models$rob[[x]]})
+), 
+list(
+  c(1:5), 
+  c(6:10)
+),
+function(X, Y) {
+  as_tibble(texreg::matrixreg(X, 
+                              custom.model.names = str_c(Y, ' days'),
+                              stars = c(0.01, 0.05, 0.1)))
+                  
+})
+
+
+l1 = list(map(1:5, ~dummy_models$rob[[.x]]), map(6:10, ~dummy_models$rob[[.x]]))
+l2 = list(c(1:5), c(6:10))
+
+bottom1 <- multi_join(left_join, map2(l1[[1]], l2[[1]], function(X, Y) {
+  glance.lmrob(X) %>%
+    mutate(name = str_c('V', Y+1)) %>%
+    pivot_longer(cols = -name, names_to = 'V1', values_to = 'value') %>%
+    pivot_wider(names_from = 'name', values_from = 'value', id_cols = 'V1') %>%
+    mutate(across(everything(), ~as.character(.x)))
+}))
+
+bottom2 <- multi_join(left_join, map2(l1[[2]], l2[[2]], function(X, Y) {
+  glance.lmrob(X) %>%
+    mutate(name = str_c('V', Y-4)) %>%
+    pivot_longer(cols = -name, names_to = 'V1', values_to = 'value') %>%
+    pivot_wider(names_from = 'name', values_from = 'value', id_cols = 'V1') %>%
+    mutate(across(everything(), ~as.character(.x)))
+}))
+
+```
+
+```{r}
+table_a1 <- bind_rows(top_table[[1]], bottom1)
+table_a1
+```
+
+```{r}
+table_a2 <- bind_rows(top_table[[2]], bottom2)
+table_a2
+```
+
+# Figure 6
+
+Create tibbles with confidence intervals and bind them together:
+
+```{r}
+tidied90 <- dummy_models %>%
+  mutate(tidied = list(tidy(rob, conf.int = T, conf.level = .9))) %>%
+  unnest(tidied) %>%
+  filter(term %in% c('(Intercept)', 'groupbefore')) %>%
+  mutate(term = case_when(term == 'groupbefore' ~ 'Before',
+                          T ~ 'Intercept')) %>%
+  select(days, term, cl90 = conf.low, ch90 = conf.high) %>%
+  ungroup()
+
+tidied95 <- dummy_models %>%
+  mutate(tidied = list(tidy(rob, conf.int = T, conf.level = .95))) %>%
+  unnest(tidied) %>%
+  filter(term %in% c('(Intercept)', 'groupbefore')) %>%
+  mutate(term = case_when(term == 'groupbefore' ~ 'Before',
+                          T ~ 'Intercept')) %>%
+  select(term, cl95 = conf.low, ch95 = conf.high) %>%
+  ungroup() %>%
+  select(-days)
+
+tidied99 <- dummy_models %>%
+  mutate(tidied = list(tidy(rob, conf.int = T, conf.level = .99))) %>%
+  unnest(tidied) %>%
+  filter(term %in% c('(Intercept)', 'groupbefore')) %>%
+  mutate(term = case_when(term == 'groupbefore' ~ 'Before',
+                          T ~ 'Intercept')) %>%
+  select(term, cl99 = conf.low, ch99 = conf.high) %>%
+  ungroup() %>%
+  select(-days)
+
+tidied_cfint <- bind_cols(tidied90, tidied95, tidied99) %>%
+  select(-5, -8) %>%
+  rename(term = term...2)
+```
+
+Plot:
+
+```{r}
+panel_a <- tidied_cfint %>%
+  pivot_longer(cols = -c(days, term), names_to = 'conf', values_to = 'value') %>%
+  mutate(level = case_when(str_detect(conf, '90') ~ '(90%)',
+                           str_detect(conf, '95') ~ '(95%)',
+                           T ~ '(99%)')) %>%
+  mutate(border = if_else(str_detect(conf, 'h'), 'sup', 'inf')) %>%
+  select(-conf) %>%
+  pivot_wider(names_from = border, values_from = value) %>%
+  mutate(level = fct_rev(level)) %>%
+  #mutate(days = fct_rev(as_factor(days))) %>%
+  mutate(days = if_else(term == 'Before', days * -1, days)) %>%
+  filter(term == 'Before') %>%
+  ggplot(aes(x = days)) +
+  geom_ribbon(aes(ymin = inf, ymax = sup, fill = level), alpha = .5) +
+  geom_hline(yintercept = 0) +
+  scale_fill_manual('Significance level', values = c('darkred', 'darkorange', 'yellow')) +
+  facet_wrap(~ term, scales = 'free_x') +
+  labs(x = 'Model (days)', y = 'Confidence intervals',
+       subtitle = 'A. Main Regressors') +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  scale_x_continuous(breaks = seq(-10, 0, 2), labels = seq(-10, 0, 2), minor_breaks = seq(-10, 0, 1)) +
+  scale_y_continuous(breaks = seq(-2, 2, 1), limits = c(-1.5, 2.2))
+
+panel_b <- tidied_cfint %>%
+  pivot_longer(cols = -c(days, term), names_to = 'conf', values_to = 'value') %>%
+  mutate(level = case_when(str_detect(conf, '90') ~ '(90%)',
+                           str_detect(conf, '95') ~ '(95%)',
+                           T ~ '(99%)')) %>%
+  mutate(border = if_else(str_detect(conf, 'h'), 'sup', 'inf')) %>%
+  select(-conf) %>%
+  pivot_wider(names_from = border, values_from = value) %>%
+  mutate(level = fct_rev(level)) %>%
+  filter(term == 'Intercept') %>%
+  ggplot(aes(x = days)) +
+  geom_ribbon(aes(ymin = inf, ymax = sup, fill = level), alpha = .5) +
+  geom_hline(yintercept = 0) +
+  scale_fill_manual('Significance level', values = c('darkred', 'darkorange', 'yellow')) +
+  facet_wrap(~ term, scales = 'free_x') +
+  labs(x = 'Model (days)', y = '', subtitle = '') +
+  theme_bw() +
+  theme(legend.position = c(.65, .745)) +
+  scale_x_continuous(breaks = seq(0, 10, 2), minor_breaks = seq(0, 10, 1)) +
+  scale_y_continuous(breaks = seq(-2, 2, 1), limits = c(-1.5, 2.2))
+
+panel_ab <- ggpubr::ggarrange(panel_a, panel_b, ncol = 2, common.legend = T)
+
+windows_rsquared_plot <- dummy_models %>%
+  mutate(tidied = list(glance.lmrob(rob))) %>%
+  unnest(tidied) %>%
+  pivot_longer(cols = c('r.squared', 'adj.r.squared'), names_to = 'stat', values_to = 'value') %>%
+  mutate(stat = fct_relevel(stat, c('r.squared', 'adj.r.squared'))) %>%
+  ggplot(aes(x = days)) +
+  geom_line(aes(y = value, color = stat)) +
+  scale_x_continuous(breaks = seq(0, 10, 3), minor_breaks = NULL) +
+  scale_color_brewer(palette = 'Dark2') +
+  labs(y = 'R squared', x = 'Model (days)',
+       subtitle = 'B. Goodness of fit statistics') +
+  theme_bw() +
+  theme(legend.title = element_blank(),
+        legend.position = c(0.75, 0.3),
+        legend.background = element_blank())
+
+ggpubr::ggarrange(panel_ab, windows_rsquared_plot, nrow = 2, heights = c(1.3, .8), common.legend = F)
+
+```
+
+# Figure 7
+
+```{r}
+filter(bis_fx_plot, name != "BR") %>%
+  ggplot(aes(x = date, y = value)) +
+  scale_color_manual("", values = "tomato3", labels = "BRL") +
+  geom_line(alpha = 0.5, aes(group = name), color = "salmon2") +
+  geom_line(data = filter(bis_fx_plot, name == "BR"), aes(color = name), size = 1.5) +
+  scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+  theme_bw() +
+  scale_y_log10() +
+  theme(legend.position = c(0.1, 0.85)) +
+  labs(x = "", y = '')
+```
+
