@@ -2,7 +2,7 @@
 title: "DNDFs paper"
 author: "João Pedro S. Macalós"
 date: "3/9/2021"
-output: html_document
+output: github_document
 ---
 
 Load required packages:
