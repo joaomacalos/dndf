@@ -7,7 +7,7 @@ output: html_document
 
 Load required packages:
 
-```{r}
+```{r, message = FALSE, warning=FALSE}
 ## Load packages
 library(lubridate)
 library(broom)
@@ -134,7 +134,7 @@ b_futs <- b_cupom %>%
   summarize(across(everything(), ~sum(.x))) %>%
   mutate(bcb = 0)
 ```
-Function to tody and relevel sectors as factors for ploting:
+Function to tidy and relevel sectors as factors for ploting:
 
 ```{r}
 tidy_b3files <- function(tibble) {
@@ -216,7 +216,7 @@ plot_inst2 <- b_futs_tidy %>%
   scale_fill_viridis_d('',
                        labels = groups_labels) +
   theme_bw(base_family = "MS Reference Sans Serif") +
-  labs(x='', y='US$ Billion', subtitle = 'B: DDI and Future Markets') +
+  labs(x='', y='US$ Billion', subtitle = 'B: DDI, FUT, and OPT markets') +
   theme(legend.position = 'bottom',
         plot.caption = element_text(hjust = 0),
         axis.title.x = element_blank()) +
@@ -224,10 +224,14 @@ plot_inst2 <- b_futs_tidy %>%
 
 
 
-ggpubr::ggarrange(plot_inst1, plot_inst2, 
+fig1 <- ggpubr::ggarrange(plot_inst1, plot_inst2, 
                   nrow = 2, ncol = 1,
                   common.legend = T,
                   legend = 'bottom') 
+
+ggsave("Figures/fig1.png", plot = fig1, dpi = 500, height = 5.5, width = 6.5)
+
+fig1
 ```
 
 # Figure 2:
@@ -251,12 +255,15 @@ banks_spot_plot = ggplot() +
   annotate("text", x = as.Date("2009-07-02"), y = 10, color = 'darkgray', label = "Long USD", size = 4) +
   annotate("text", x = as.Date("2009-07-02"), y = -38, color = 'darkgray', label = "Short USD", size = 4) +
   scale_x_date(breaks = '1 year', date_labels = '%Y', minor_breaks = NULL) +
-  scale_fill_viridis_d('') +
+  #scale_fill_viridis_d('') +
+  scale_fill_manual("", values = wesanderson::wes_palette("Zissou1")[2]) +
   labs(x='', y='US$ Billion') +
   theme_bw(base_family = "MS Reference Sans Serif") +
   theme(legend.position = 'none',
         plot.caption = element_text(hjust = 0)) +
   guides(fill=guide_legend(nrow=1,byrow=TRUE))
+
+ggsave("Figures/fig2.png", plot = banks_spot_plot, dpi = 500, height = 5.5, width = 6.5)
 
 banks_spot_plot
 ```
@@ -322,21 +329,46 @@ b_rob3 <- lmtest::coeftest(b_reg3, vcov = sandwich::vcovHC(b_reg3, type = "HC0")
 texreg::screenreg(list(b_reg1, b_rob1, b_reg2, b_rob2, b_reg3, b_rob3), stars = c(.01, .05, .1), digits = 3)
 ```
 
-# Figure 4.3
+# Figure 3
 
 ```{r}
-b3_volume %>%
-  ggplot(aes(x = date, y = vol_usd)) +
-  geom_col(aes(fill = mercado)) +
-  geom_col(aes(fill = mercado, color = mercado), show.legend = FALSE) +
+mav_b3_vol <- b3_volume %>%
+  group_by(date) %>%
+  summarize(vol_usd = sum(vol_usd, na.rm = TRUE)) %>%
+  mutate(mav = as.numeric(data.table::frollmean(vol_usd, 6))) %>%
+  drop_na()
+
+
+b3_vol2 <- b3_volume %>%
+  pivot_wider(id_cols = date, names_from = mercado, values_from = vol_usd) %>%
+  left_join(mav_b3_vol) %>%
+  select(-vol_usd) %>%
+  pivot_longer(cols = -date)
+```
+
+
+```{r}
+fig3 <- ggplot(b3_vol2, aes(x = date)) +
+  geom_col(data = filter(b3_vol2, name != "mav"), aes(fill = name, y = value), alpha = 0.4) +
+  geom_col(data = filter(b3_vol2, name != "mav"), aes(fill = name, color = name, y = value), show.legend = FALSE, alpha = 0.4) +
+  geom_line(data = filter(b3_vol2, name == "mav"), aes(y = value), color = "royalblue4", size = 2) +
+  #annotate(geom = "text", x = as.Date("2012-08-01"), y = 375, label = "6 months moving average", color = "royalblue4", size = 5) +
   theme_bw() +
-  theme(legend.position = c(.1, .85),
-        legend.box.background = element_rect(colour = "black", size = 2)) +
   #scale_fill_brewer("Contract:", palette = "YlGnBu", direction = -1) +
-  scale_fill_viridis_d("Contract:") +
-  scale_color_viridis_d() +
+  #scale_fill_viridis_d("Contract:") +
+  scale_fill_manual("Contract:", values = wesanderson::wes_palette("Zissou1")[c(1, 2, 3)]) +
+  #scale_color_viridis_d() +
+  scale_color_manual(values = wesanderson::wes_palette("Zissou1")[c(1, 2, 3)]) +
   labs(y = "US$ Billion", x = "") +
-  scale_x_date(date_breaks = "2 year", date_labels = "%Y")
+  scale_x_date(date_breaks = "2 year", date_labels = "%Y") +
+  guides(fill = guide_legend(override.aes = list(alpha = 1) ) ) +
+  theme(legend.position = c(.1, .85),
+        legend.box.background = element_rect(colour = "black", size = 2),
+        plot.caption = element_text(hjust = 0, face= "italic"))
+
+ggsave("Figures/fig3.png", plot = fig3, dpi = 500, height = 5.5, width = 6.5)
+
+fig3
 ```
 
 
@@ -410,7 +442,7 @@ d_swaps1 <- c_swaps %>%
 Plot:
 
 ```{r}
-ggplot(data = d_swaps1, aes(x = date)) +
+fig4 <- ggplot(data = d_swaps1, aes(x = date)) +
   geom_line(data = d_swaps1, aes(y = embi, color = 'black')) +
   geom_bar(data = (d_swaps2 %>% mutate(coupon = 1)), 
            aes(y = spread, fill = as_factor(coupon)), position = 'dodge', stat = 'identity', width = 5, alpha = 0.7) +
@@ -427,6 +459,10 @@ ggplot(data = d_swaps1, aes(x = date)) +
         legend.background = element_blank(),
         plot.caption = element_text(hjust = 0),
         legend.direction="horizontal")
+
+ggsave("Figures/fig4.png", plot = fig4, dpi = 500, height = 5.5, width = 6.5)
+
+fig4
 ```
 
 # Appendix A: GARCH analysis
@@ -597,15 +633,22 @@ spr_std_residuals <- map(spr_garch_est, ~residuals(.x, standardize = T))
 ## Standardized residuals 
 map(spr_std_residuals, ~as_tibble(rugarch_boxtest(.x, df = 1), rownames = 'Lag'))
 #--> No evidence of remaining autocorrelation
+```
+
+```{r}
 
 ## Standardized squared residuals
 map(spr_std_residuals, ~as_tibble(rugarch_boxtest(.x, df = 2, p = 2), rownames = 'Lag'))
 #--> No evidence of remaining GARCH effects
+```
 
+```{r}
 ## Weighted ARCH-LM test
 map(spr_garch_est, ~as_tibble(rugarch_archlm(.x), rownames = 'Lag'))
 #--> No evidence of remaining GARCH effects
+```
 
+```{r}
 ## Individual Nyblom stability tests
 # Create a dictionary to correct column names
 ext_regs_name <- colnames(spr_matrix)
@@ -620,6 +663,7 @@ map(spr_garch_est, ~as_tibble(nyblom(.x)$IndividualStat, rownames = 'Variable') 
       mutate(Stable_5pc = if_else(V1 - 0.47 > 0, 'No', 'Yes')))
 #--> The coefficients of interest are stable over time
 ```
+
 
 # Table B1
 
@@ -655,17 +699,21 @@ fig5data <- garch_spr %>%
   drop_na() %>% 
   filter(date <= "2021-01-01")
 
-fig5data %>%
+fig5 <- fig5data %>%
   ggplot() +
   geom_bar(aes(x=date, y=spr*2.25, fill = 'blue'), position='dodge', stat='identity', alpha = 0.4, width = 10) +
   geom_line(aes(x=date, y=sigma, color = 'blue'), stat='identity', size = 0.75) +
   scale_color_manual("", values = c('black'), labels = c('Cond. variance')) +
-  scale_fill_manual("", values = c('dodgerblue3'), labels = c('High-coupon FX Swaps')) +
+  scale_fill_manual("", values = c('dodgerblue3'), labels = c('High-coupon DNDFs')) +
   labs(x='', y='Cond. variance') +
   scale_x_date(breaks = '1 year', date_labels = '%Y') +
   theme_bw(base_family = "MS Reference Sans Serif") +
   theme(legend.position = 'bottom',
         plot.caption = element_text(hjust = 0))
+
+ggsave("Figures/fig5.png", plot = fig5, dpi = 500, height = 4, width = 6.5)
+
+fig5
 ```
 
 # Windows estimation
@@ -963,8 +1011,6 @@ table_a2 <- bind_rows(top_table[[2]], bottom2)
 table_a2
 ```
 
-# Figure 6
-
 Create tibbles with confidence intervals and bind them together:
 
 ```{r}
@@ -1001,6 +1047,7 @@ tidied_cfint <- bind_cols(tidied90, tidied95, tidied99) %>%
   select(-5, -8) %>%
   rename(term = term...2)
 ```
+# Figure 6
 
 Plot:
 
@@ -1068,14 +1115,18 @@ windows_rsquared_plot <- dummy_models %>%
         legend.position = c(0.75, 0.3),
         legend.background = element_blank())
 
-ggpubr::ggarrange(panel_ab, windows_rsquared_plot, nrow = 2, heights = c(1.3, .8), common.legend = F)
+fig6 <- ggpubr::ggarrange(panel_ab, windows_rsquared_plot, nrow = 2, heights = c(1.3, .8), common.legend = F)
+
+ggsave("Figures/fig6.png", plot = fig6, dpi = 500, height = 4, width = 6.5)
+
+fig6
 
 ```
 
 # Figure 7
 
 ```{r}
-filter(bis_fx_plot, name != "BR") %>%
+fig7 <- filter(bis_fx_plot, name != "BR") %>%
   ggplot(aes(x = date, y = value)) +
   scale_color_manual("", values = "tomato3", labels = "BRL") +
   geom_line(alpha = 0.5, aes(group = name), color = "salmon2") +
@@ -1085,5 +1136,9 @@ filter(bis_fx_plot, name != "BR") %>%
   scale_y_log10() +
   theme(legend.position = c(0.1, 0.85)) +
   labs(x = "", y = '')
+
+ggsave("Figures/fig7.png", plot = fig7, dpi = 500, height = 4, width = 6.5)
+
+fig7
 ```
 
